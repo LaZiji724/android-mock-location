@@ -35,6 +35,7 @@ object Geo {
 }
 
 class RouteTrack(input: List<Point>) {
+    init { require(input.all { it.valid() }) { "路线包含无效坐标" } }
     val points: List<Point> = input.filterIndexed { index, point -> index == 0 || Geo.distance(input[index - 1], point) > 0.001 }
     private val cumulative = mutableListOf(0.0)
     init {

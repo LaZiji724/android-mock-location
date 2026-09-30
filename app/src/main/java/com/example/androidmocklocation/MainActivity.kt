@@ -81,6 +81,9 @@ private fun App(allowed: Boolean, activity: MainActivity) {
     var refresh by remember { mutableIntStateOf(0) }
     var name by remember { mutableStateOf("") }
     var centerRequest by remember { mutableIntStateOf(0) }
+    DisposableEffect(store) { onDispose { store.close() } }
+    // History is written by the service after the command has been delivered.
+    LaunchedEffect(snapshot.historyRevision) { refresh++ }
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     fun choose(point: Point) {
         selected = point
@@ -347,7 +350,7 @@ private fun NativeMap(selected: Point, submitted: Point?, route: List<Point>, fa
         favorites.forEach { m.addMarker(MarkerOptions().position(mapPoint(it)).title("收藏位置")) }
         if (route.size >= 2) m.addPolyline(PolylineOptions().addAll(route.map(::mapPoint)).color(android.graphics.Color.BLUE).width(4f))
     }
-    LaunchedEffect(centerRequest) {
+    LaunchedEffect(map, ready, centerRequest) {
         val m = map ?: return@LaunchedEffect
         val point = Coordinates.toMap(selected, MapSources.coordinateSystem)
         m.animateCamera(CameraUpdateFactory.newLatLng(LatLng(point.lat, point.lon)))

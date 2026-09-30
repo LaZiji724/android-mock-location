@@ -11,3 +11,4 @@ local.properties
 *.keystore
 *.p12
 *.pfx
+.kotlin/
