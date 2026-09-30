@@ -38,7 +38,8 @@ data class SessionSnapshot(
     val serviceRunning: Boolean = false,
     val routeMetres: Double = 0.0,
     val routeRemaining: Double = 0.0,
-    val canResumeRoute: Boolean = false
+    val canResumeRoute: Boolean = false,
+    val historyRevision: Long = 0
 )
 
 object Session {
@@ -102,6 +103,12 @@ class MockLocationService : Service() {
         try {
             if (!Session.mockAllowed(this)) throw SecurityException("请先在开发者选项中选择本应用为模拟位置信息应用")
             showForeground()
+            require(action in setOf(FIX, ROUTE, PAUSE, RESUME, JOYSTICK, STEER, RELEASE, END_JOYSTICK, SPEED)) { "未知定位指令" }
+            // Late controls must not leave an empty foreground service after STOP.
+            if (!providerOwned && action != FIX && action != ROUTE && action != JOYSTICK) {
+                stopSession()
+                return START_NOT_STICKY
+            }
             if (action == FIX || action == ROUTE || action == JOYSTICK) Session.update { it.copy(error = "") }
             when (action) {
                 FIX -> {
@@ -114,6 +121,7 @@ class MockLocationService : Service() {
                 }
                 ROUTE -> {
                     val raw = intent.getDoubleArrayExtra("route") ?: doubleArrayOf()
+                    require(raw.size % 2 == 0) { "路线坐标必须成对提供" }
                     val track = RouteTrack(raw.toList().chunked(2).filter { it.size == 2 }.map { Point(it[0], it[1]) })
                     speed = intent.getDoubleExtra("speed", speed).also { require(it in 0.1..100.0) }
                     prepareProvider()
@@ -130,8 +138,12 @@ class MockLocationService : Service() {
                 }
                 RESUME -> {
                     if (mode == "ROUTE_PAUSED" || mode == "JOYSTICK") {
-                        requireNotNull(route?.takeUnless { it.finished }) { "没有可继续的路线" }
-                        route?.paused = false; mode = "ROUTE_RUNNING"; moving = true
+                        val progress = requireNotNull(route?.takeUnless { it.finished }) { "没有可继续的路线" }
+                        steeringActive = false
+                        progress.paused = false; mode = "ROUTE_RUNNING"; moving = true
+                        current = progress.track.at(progress.travelled)
+                        speed = progress.speedMetresPerSecond
+                        heading = progress.track.bearingAt(progress.travelled)
                     } else if (mode == "FIXED_PAUSED") mode = "FIXED"
                     emit()
                 }
@@ -146,13 +158,17 @@ class MockLocationService : Service() {
                 }
                 STEER -> {
                     if (mode == "JOYSTICK") {
-                        steeringBearing = intent.getDoubleExtra("bearing", 0.0)
-                        speed = intent.getDoubleExtra("speed", speed).coerceIn(0.1, 100.0)
+                        val bearing = intent.getDoubleExtra("bearing", 0.0)
+                        require(bearing.isFinite()) { "方向必须为有限数值" }
+                        val requestedSpeed = intent.getDoubleExtra("speed", speed)
+                        require(requestedSpeed in 0.1..100.0) { "速度需在 0.1–100 米/秒" }
+                        steeringBearing = ((bearing % 360) + 360) % 360
+                        speed = requestedSpeed
                         steeringActive = true; moving = true
                     }
                 }
-                RELEASE -> { steeringActive = false; moving = false; if (mode == "JOYSTICK") emit() }
-                END_JOYSTICK -> {
+                RELEASE -> if (mode == "JOYSTICK") { steeringActive = false; moving = false; emit() }
+                END_JOYSTICK -> if (mode == "JOYSTICK") {
                     steeringActive = false; moving = false
                     mode = if (route != null && route?.finished == false) "ROUTE_PAUSED" else "FIXED"
                     publish(); emit()
@@ -246,7 +262,10 @@ class MockLocationService : Service() {
         updateNotification()
     }
     private fun recordHistory(name: String, point: Point) {
-        try { Store(this).use { it.addPoint("history", name, point) } }
+        try {
+            Store(this).use { it.addPoint("history", name, point) }
+            Session.update { it.copy(historyRevision = it.historyRevision + 1) }
+        }
         catch (e: Exception) { Session.update { it.copy(error = "历史记录保存失败：${e.message}") } }
     }
     private fun notification(): Notification {
@@ -290,6 +309,7 @@ class MockLocationService : Service() {
         }
         scope.cancel()
         Session.update { it.copy(mode = "IDLE", target = null, serviceRunning = false,
+            canResumeRoute = false, routeMetres = 0.0, routeRemaining = 0.0,
             error = if (interrupted) "服务被系统结束；请在应用内重新启动模拟" else it.error) }
         super.onDestroy()
     }

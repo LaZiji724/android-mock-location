@@ -79,6 +79,12 @@ class MockLocationIntegrationTest {
             Session.command(context, MockLocationService.RESUME)
             waitUntil { Session.state.value.mode == "ROUTE_RUNNING" }
             assertTrue(Session.state.value.routeMetres >= pausedAt)
+            // A direction gesture can finish after the resume button is pressed.
+            Session.command(context, MockLocationService.RELEASE)
+            Session.command(context, MockLocationService.END_JOYSTICK)
+            val resumedAt = Session.state.value.routeMetres
+            waitUntil { Session.state.value.routeMetres > resumedAt }
+            assertEquals("ROUTE_RUNNING", Session.state.value.mode)
             Session.command(context, MockLocationService.STOP)
             waitUntil { Session.state.value.mode == "IDLE" }
         }

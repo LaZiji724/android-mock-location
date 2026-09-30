@@ -69,5 +69,15 @@ class GeoRouteTest {
     }
 
     @Test(expected = IllegalArgumentException::class)
+    fun invalidIntermediatePointIsRejected() {
+        RouteTrack(listOf(beijing, Point(Double.NaN, 0.0), Point(39.9042, 116.4174), Point(39.9042, 116.4274)))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun invalidTrailingPointIsRejected() {
+        RouteTrack(listOf(beijing, Point(39.9042, 116.4174), Point(0.0, Double.NaN)))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
     fun onePointRouteRejected() { RouteTrack(listOf(beijing)) }
 }
