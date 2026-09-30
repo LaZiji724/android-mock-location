@@ -1,0 +1,13 @@
+.gradle/
+.tools/
+.sdk/
+local.properties
+**/build/
+*.iml
+.DS_Store
+.env
+.env.*
+*.jks
+*.keystore
+*.p12
+*.pfx
