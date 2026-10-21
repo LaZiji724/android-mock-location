@@ -10,29 +10,48 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.*
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.launch
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
@@ -41,7 +60,6 @@ import org.maplibre.android.annotations.MarkerOptions
 import org.maplibre.android.annotations.PolylineOptions
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
-import kotlinx.coroutines.flow.collectLatest
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
@@ -55,10 +73,11 @@ object MapSources {
 class MainActivity : ComponentActivity() {
     private var mockAllowed by mutableStateOf(false)
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         MapLibre.getInstance(this)
         mockAllowed = Session.mockAllowed(this)
-        setContent { MaterialTheme { App(mockAllowed, this) } }
+        setContent { AppTheme { App(mockAllowed, this) } }
     }
     override fun onResume() {
         super.onResume()
@@ -66,6 +85,16 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private data class Destination(val title: String, val icon: ImageVector, val selectedIcon: ImageVector)
+
+private val destinations = listOf(
+    Destination("地图", AppIcons.Map, AppIcons.Map),
+    Destination("路线", AppIcons.Route, AppIcons.Route),
+    Destination("收藏", AppIcons.StarBorder, Icons.Rounded.Star),
+    Destination("诊断", Icons.Outlined.Build, Icons.Rounded.Build)
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun App(allowed: Boolean, activity: MainActivity) {
     val context = LocalContext.current
@@ -77,14 +106,19 @@ private fun App(allowed: Boolean, activity: MainActivity) {
     var tab by remember { mutableIntStateOf(0) }
     val waypoints = remember { mutableStateListOf<Point>() }
     var speedText by remember { mutableStateOf("1.4") }
-    var message by remember { mutableStateOf("") }
     var refresh by remember { mutableIntStateOf(0) }
-    var name by remember { mutableStateOf("") }
+    var routeName by remember { mutableStateOf("") }
+    var favoriteName by remember { mutableStateOf("") }
     var centerRequest by remember { mutableIntStateOf(0) }
+    val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     DisposableEffect(store) { onDispose { store.close() } }
     // History is written by the service after the command has been delivered.
     LaunchedEffect(snapshot.historyRevision) { refresh++ }
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    fun notify(text: String) {
+        scope.launch { snackbar.currentSnackbarData?.dismiss(); snackbar.showSnackbar(text) }
+    }
     fun choose(point: Point) {
         selected = point
         latitude = String.format(Locale.US, "%.6f", point.lat)
@@ -93,186 +127,401 @@ private fun App(allowed: Boolean, activity: MainActivity) {
     fun parsedPoint(): Point? = Point(latitude.toDoubleOrNull() ?: Double.NaN, longitude.toDoubleOrNull() ?: Double.NaN).takeIf { it.valid() }
     fun parsedSpeed(): Double? = speedText.toDoubleOrNull()?.takeIf { it in 0.1..100.0 }
     fun begin(action: () -> Unit) {
-        if (!allowed) { message = "请先在开发者选项中选择本应用为模拟位置信息应用"; return }
+        if (!allowed) { notify("请先在开发者选项中选择本应用为模拟位置信息应用"); return }
         if (Build.VERSION.SDK_INT >= 33) notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        try { action(); message = "已发送定位指令，请查看状态与诊断页" }
-        catch (e: Exception) { message = e.message ?: "操作失败" }
+        try { action(); notify("已发送定位指令，请查看状态与诊断页") }
+        catch (e: Exception) { notify(e.message ?: "操作失败") }
     }
+    fun openDeveloperSettings() = activity.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+    val favoritePoints = remember(refresh) { store.points("favorites").map { it.point } }
 
     Scaffold(
-        topBar = {
-            Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primaryContainer).statusBarsPadding().padding(14.dp)) {
-                Text("安卓改定位", style = MaterialTheme.typography.titleLarge)
-                Text("${snapshot.mode} · ${if (allowed) "模拟定位已授权" else "需要系统授权"}")
-            }
-        },
+        topBar = { StatusHeader(allowed, snapshot, onStop = { Session.command(context, MockLocationService.STOP) }) },
+        snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             NavigationBar {
-                listOf("地图", "路线", "收藏", "诊断").forEachIndexed { index, title ->
-                    NavigationBarItem(selected = tab == index, onClick = { tab = index }, icon = { Text("●") }, label = { Text(title) })
+                destinations.forEachIndexed { index, item ->
+                    NavigationBarItem(selected = tab == index, onClick = { tab = index },
+                        icon = { Icon(if (tab == index) item.selectedIcon else item.icon, contentDescription = null) },
+                        label = { Text(item.title) })
                 }
             }
         }
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
-            if (!allowed) {
-                Text("需先开启开发者选项，并将“选择模拟位置信息应用”设为安卓改定位。返回此页会自动重新检查。", Modifier.padding(12.dp))
-                Button(onClick = { activity.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) }, Modifier.padding(horizontal = 12.dp)) { Text("打开开发者选项") }
-            }
-            if (message.isNotBlank()) Text(message, Modifier.padding(horizontal = 12.dp), color = MaterialTheme.colorScheme.primary)
+        Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
+            AnimatedVisibility(!allowed) { PermissionBanner(onOpen = ::openDeveloperSettings) }
             when (tab) {
                 0 -> {
-                    Box(Modifier.fillMaxWidth().weight(1f)) {
-                        NativeMap(selected, snapshot.submitted, waypoints.toList(), remember(refresh) { store.points("favorites").map { it.point } }, centerRequest, { choose(it) }, Modifier.fillMaxSize())
-                        Text(MapSources.ATTRIBUTION, Modifier.align(Alignment.BottomStart).background(Color.White.copy(alpha = 0.85f)).padding(3.dp), style = MaterialTheme.typography.labelSmall)
-                    }
-                    Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                        Text("点击地图选点 · WGS-84", style = MaterialTheme.typography.titleSmall)
-                        TextButton(onClick = { centerRequest++ }) { Text("地图中心移至选点") }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MapPane(Modifier.weight(1f), selected, snapshot.submitted, waypoints.toList(), favoritePoints, centerRequest,
+                        onSelect = { choose(it) }, onCenter = { centerRequest++ }, hint = "点击地图选点")
+                    ControlPanel {
+                        SectionTitle("目标坐标", "WGS-84")
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             OutlinedTextField(latitude, { latitude = it }, label = { Text("纬度") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f), singleLine = true)
                             OutlinedTextField(longitude, { longitude = it }, label = { Text("经度") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f), singleLine = true)
                         }
-                        Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             Button(onClick = {
                                 val point = parsedPoint()
-                                if (point == null) message = "经纬度无效" else begin {
+                                if (point == null) notify("经纬度无效") else begin {
                                     choose(point); refresh++
                                     Session.command(context, MockLocationService.FIX, point)
                                 }
-                            }, enabled = allowed, modifier = Modifier.weight(1f)) { Text("开始固定定位") }
-                            if (snapshot.mode == "FIXED") OutlinedButton(onClick = { Session.command(context, MockLocationService.PAUSE) }) { Text("暂停") }
-                            if (snapshot.mode == "FIXED_PAUSED") OutlinedButton(onClick = { Session.command(context, MockLocationService.RESUME) }) { Text("继续") }
-                            if (snapshot.serviceRunning) OutlinedButton(onClick = { Session.command(context, MockLocationService.STOP) }) { Text("停止") }
+                            }, enabled = allowed, modifier = Modifier.weight(1f).height(48.dp)) {
+                                Icon(AppIcons.MyLocation, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("开始固定定位")
+                            }
+                            if (snapshot.mode == "FIXED") FilledTonalIconButton(onClick = { Session.command(context, MockLocationService.PAUSE) }, Modifier.size(48.dp)) { Icon(AppIcons.Pause, "暂停") }
+                            if (snapshot.mode == "FIXED_PAUSED") FilledTonalIconButton(onClick = { Session.command(context, MockLocationService.RESUME) }, Modifier.size(48.dp)) { Icon(Icons.Rounded.PlayArrow, "继续") }
+                            if (snapshot.serviceRunning) StopButton { Session.command(context, MockLocationService.STOP) }
                         }
-                        Text("已提交：${snapshot.submitted ?: "无"} · ${snapshot.result}", style = MaterialTheme.typography.bodySmall)
+                        SubmittedLine(snapshot)
                     }
                 }
                 1 -> {
-                    Box(Modifier.fillMaxWidth().weight(0.9f)) {
-                        NativeMap(selected, snapshot.submitted, waypoints.toList(), remember(refresh) { store.points("favorites").map { it.point } }, centerRequest, { point -> choose(point); waypoints += point }, Modifier.fillMaxSize())
-                        Text(MapSources.ATTRIBUTION, Modifier.align(Alignment.BottomStart).background(Color.White.copy(alpha = 0.85f)).padding(3.dp), style = MaterialTheme.typography.labelSmall)
-                    }
-                    Column(Modifier.fillMaxWidth().weight(1.1f).padding(12.dp)) {
-                        Text("路线编辑：点地图添加途经点", style = MaterialTheme.typography.titleSmall)
-                        OutlinedTextField(speedText, { speedText = it }, label = { Text("速度（米/秒，0.1–100）") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Button(onClick = {
-                                val speed = parsedSpeed()
-                                if (speed == null) message = "速度需在 0.1–100 米/秒" else begin {
-                                    Session.command(context, MockLocationService.ROUTE, speed = speed, points = waypoints.toList())
-                                }
-                            }, enabled = allowed && waypoints.size >= 2, modifier = Modifier.weight(1f)) { Text("开始路线") }
-                            if (snapshot.mode == "ROUTE_RUNNING") OutlinedButton(onClick = { Session.command(context, MockLocationService.PAUSE) }) { Text("暂停") }
-                            if (snapshot.canResumeRoute) OutlinedButton(onClick = { Session.command(context, MockLocationService.RESUME) }) { Text("继续") }
-                            if (snapshot.serviceRunning) OutlinedButton(onClick = { Session.command(context, MockLocationService.STOP) }) { Text("停止") }
-                        }
-                        OutlinedButton(onClick = {
-                            val speed = parsedSpeed()
-                            if (speed == null) message = "速度无效" else Session.command(context, MockLocationService.SPEED, speed = speed)
-                        }, enabled = snapshot.mode == "ROUTE_RUNNING" || snapshot.mode == "ROUTE_PAUSED") { Text("应用新速度") }
-                        Text("已走 %.1f 米 · 剩余 %.1f 米".format(Locale.US, snapshot.routeMetres, snapshot.routeRemaining))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { waypoints.clear() }) { Text("清空") }
-                            OutlinedButton(onClick = { if (waypoints.isNotEmpty()) waypoints.removeAt(waypoints.lastIndex) }) { Text("撤销末点") }
-                            OutlinedButton(onClick = {
-                                try { store.addRoute(name.ifBlank { "手动路线" }, waypoints.toList()); refresh++; message = "路线已保存" }
-                                catch (e: Exception) { message = e.message ?: "保存失败" }
-                            }, enabled = waypoints.size >= 2) { Text("保存路线") }
-                        }
-                        OutlinedTextField(name, { name = it }, label = { Text("路线或收藏名称") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                        LazyColumn(Modifier.weight(1f)) {
-                            items(waypoints.size) { index ->
-                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                    Text("${index + 1}. ${waypoints[index]}", Modifier.weight(1f))
-                                    TextButton(onClick = { if (index > 0) { val p = waypoints.removeAt(index); waypoints.add(index - 1, p) } }) { Text("↑") }
-                                    TextButton(onClick = { if (index < waypoints.lastIndex) { val p = waypoints.removeAt(index); waypoints.add(index + 1, p) } }) { Text("↓") }
-                                    TextButton(onClick = { waypoints.removeAt(index) }) { Text("删") }
+                    MapPane(Modifier.weight(0.85f), selected, snapshot.submitted, waypoints.toList(), favoritePoints, centerRequest,
+                        onSelect = { point -> choose(point); waypoints += point }, onCenter = { centerRequest++ },
+                        hint = if (waypoints.isEmpty()) "点击地图添加途经点" else "已添加 ${waypoints.size} 个途经点")
+                    LazyColumn(
+                        Modifier.weight(1.15f).fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow),
+                        contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        if (snapshot.mode == "JOYSTICK") item {
+                            PanelCard {
+                                SectionTitle("虚拟摇杆", "按住移动 · 松开停留")
+                                JoystickControls(speedText, onDirection = { bearing -> Session.command(context, MockLocationService.STEER, speed = parsedSpeed() ?: 1.4, bearing = bearing) }, onRelease = { Session.command(context, MockLocationService.RELEASE) })
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedButton(onClick = { Session.command(context, MockLocationService.END_JOYSTICK) }, Modifier.weight(1f)) { Text("退出摇杆") }
+                                    if (snapshot.canResumeRoute) Button(onClick = { Session.command(context, MockLocationService.RESUME) }, Modifier.weight(1f)) { Text("继续原路线") }
                                 }
                             }
                         }
-                        if (snapshot.mode == "JOYSTICK") {
-                            Text("摇杆控制中 · 松开方向键保持位置")
-                            JoystickControls(speedText, onDirection = { bearing -> Session.command(context, MockLocationService.STEER, speed = parsedSpeed() ?: 1.4, bearing = bearing) }, onRelease = { Session.command(context, MockLocationService.RELEASE) })
-                            Row {
-                                OutlinedButton(onClick = { Session.command(context, MockLocationService.END_JOYSTICK) }) { Text("退出摇杆") }
-                                if (snapshot.canResumeRoute) OutlinedButton(onClick = { Session.command(context, MockLocationService.RESUME) }) { Text("继续原路线") }
+                        item {
+                            PanelCard {
+                                SectionTitle("路线控制", "${waypoints.size} 个途经点")
+                                OutlinedTextField(speedText, { speedText = it }, label = { Text("速度（米/秒，0.1–100）") },
+                                    supportingText = { Text(speedHint(speedText)) },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Button(onClick = {
+                                        val speed = parsedSpeed()
+                                        if (speed == null) notify("速度需在 0.1–100 米/秒") else begin {
+                                            Session.command(context, MockLocationService.ROUTE, speed = speed, points = waypoints.toList())
+                                        }
+                                    }, enabled = allowed && waypoints.size >= 2, modifier = Modifier.weight(1f).height(48.dp)) {
+                                        Icon(AppIcons.Navigation, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("开始路线")
+                                    }
+                                    if (snapshot.mode == "ROUTE_RUNNING") FilledTonalIconButton(onClick = { Session.command(context, MockLocationService.PAUSE) }, Modifier.size(48.dp)) { Icon(AppIcons.Pause, "暂停") }
+                                    if (snapshot.canResumeRoute) FilledTonalIconButton(onClick = { Session.command(context, MockLocationService.RESUME) }, Modifier.size(48.dp)) { Icon(Icons.Rounded.PlayArrow, "继续") }
+                                    if (snapshot.serviceRunning) StopButton { Session.command(context, MockLocationService.STOP) }
+                                }
+                                val routeActive = snapshot.mode == "ROUTE_RUNNING" || snapshot.mode == "ROUTE_PAUSED"
+                                OutlinedButton(onClick = {
+                                    val speed = parsedSpeed()
+                                    if (speed == null) notify("速度无效") else Session.command(context, MockLocationService.SPEED, speed = speed)
+                                }, enabled = routeActive, modifier = Modifier.fillMaxWidth()) { Text("应用新速度") }
+                                RouteProgressBar(snapshot.routeMetres, snapshot.routeRemaining)
+                                if (snapshot.mode != "JOYSTICK") FilledTonalButton(onClick = {
+                                    val speed = parsedSpeed()
+                                    if (speed == null) notify("速度无效") else begin { Session.command(context, MockLocationService.JOYSTICK, point = snapshot.submitted ?: selected, speed = speed) }
+                                }, enabled = allowed, modifier = Modifier.fillMaxWidth()) {
+                                    Icon(AppIcons.Gamepad, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("进入虚拟摇杆")
+                                }
                             }
-                        } else Button(onClick = {
-                            val speed = parsedSpeed()
-                            if (speed == null) message = "速度无效" else begin { Session.command(context, MockLocationService.JOYSTICK, point = snapshot.submitted ?: selected, speed = speed) }
-                        }, enabled = allowed) { Text("进入虚拟摇杆") }
-                    }
-                }
-                2 -> {
-                    val favorites = remember(refresh) { store.points("favorites") }
-                    val history = remember(refresh) { store.points("history") }
-                    val routes = remember(refresh) { store.routes() }
-                    Column(Modifier.fillMaxSize().padding(12.dp)) {
-                        Text("收藏和历史均保存 WGS-84 坐标", style = MaterialTheme.typography.titleMedium)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(name, { name = it }, label = { Text("名称") }, modifier = Modifier.weight(1f), singleLine = true)
-                            Button(onClick = { store.addPoint("favorites", name.ifBlank { "收藏地点" }, selected); refresh++; message = "已收藏" }) { Text("收藏选点") }
-                            OutlinedButton(onClick = {
-                                val point = snapshot.submitted
-                                if (point != null) { store.addPoint("favorites", name.ifBlank { "当前模拟位置" }, point); refresh++ }
-                            }, enabled = snapshot.submitted != null) { Text("收藏当前位置") }
                         }
-                        LazyColumn {
-                            item { Text("收藏", style = MaterialTheme.typography.titleSmall) }
-                            items(favorites, key = { "f${it.id}" }) { item ->
-                                SavedPointRow(item, onChoose = { choose(item.point); tab = 0 }, onDelete = { store.delete("favorites", item.id); refresh++ }, onRename = { store.renameFavorite(item.id, name.ifBlank { item.name }); refresh++ })
-                            }
-                            item { Text("历史", style = MaterialTheme.typography.titleSmall) }
-                            items(history, key = { "h${it.id}" }) { item ->
-                                SavedPointRow(item, onChoose = { choose(item.point); tab = 0 }, onDelete = null, onRename = null)
-                            }
-                            item { Text("已保存路线", style = MaterialTheme.typography.titleSmall) }
-                            items(routes, key = { "r${it.id}" }) { item ->
-                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                    Text("${item.name} · ${item.points.size} 点", Modifier.weight(1f))
-                                    TextButton(onClick = { waypoints.clear(); waypoints.addAll(item.points); choose(item.points.first()); tab = 1 }) { Text("加载") }
-                                    TextButton(onClick = { store.delete("routes", item.id); refresh++ }) { Text("删除") }
+                        item {
+                            PanelCard {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(Modifier.weight(1f)) { SectionTitle("途经点", null) }
+                                    IconButton(onClick = { if (waypoints.isNotEmpty()) waypoints.removeAt(waypoints.lastIndex) }, enabled = waypoints.isNotEmpty()) { Icon(AppIcons.Undo, "撤销末点") }
+                                    IconButton(onClick = { waypoints.clear() }, enabled = waypoints.isNotEmpty()) { Icon(Icons.Rounded.Clear, "清空") }
+                                }
+                                if (waypoints.isEmpty()) EmptyHint("在上方地图上点击即可依次添加途经点，至少需要 2 个。")
+                                waypoints.forEachIndexed { index, point ->
+                                    WaypointRow(index, point, waypoints.lastIndex,
+                                        onUp = { if (index > 0) { val p = waypoints.removeAt(index); waypoints.add(index - 1, p) } },
+                                        onDown = { if (index < waypoints.lastIndex) { val p = waypoints.removeAt(index); waypoints.add(index + 1, p) } },
+                                        onDelete = { waypoints.removeAt(index) })
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    OutlinedTextField(routeName, { routeName = it }, label = { Text("路线名称") }, modifier = Modifier.weight(1f), singleLine = true)
+                                    FilledTonalButton(onClick = {
+                                        try { store.addRoute(routeName.ifBlank { "手动路线" }, waypoints.toList()); refresh++; notify("路线已保存") }
+                                        catch (e: Exception) { notify(e.message ?: "保存失败") }
+                                    }, enabled = waypoints.size >= 2) { Text("保存") }
                                 }
                             }
                         }
                     }
                 }
-                else -> Diagnostics(allowed, selected, snapshot, activity)
+                2 -> SavedScreen(store, refresh, selected, snapshot.submitted, favoriteName, { favoriteName = it },
+                    onChanged = { refresh++ }, notify = ::notify,
+                    onChoose = { choose(it); tab = 0 },
+                    onLoadRoute = { route -> waypoints.clear(); waypoints.addAll(route.points); choose(route.points.first()); tab = 1 })
+                else -> Diagnostics(allowed, selected, snapshot, onOpenSettings = ::openDeveloperSettings, notify = ::notify)
+            }
+        }
+    }
+}
+
+private fun speedHint(text: String): String {
+    val speed = text.toDoubleOrNull() ?: return "请输入数字"
+    return "约 %.1f 公里/小时 · 步行 1.4 · 骑行 5 · 驾车 15".format(Locale.US, speed * 3.6)
+}
+
+@Composable
+private fun StatusHeader(allowed: Boolean, snapshot: SessionSnapshot, onStop: () -> Unit) {
+    val active = snapshot.serviceRunning
+    val paused = snapshot.mode.endsWith("PAUSED")
+    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
+        Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary), contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.LocationOn, null, tint = MaterialTheme.colorScheme.onPrimary)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("安卓改定位", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val dot = when {
+                        !active -> MaterialTheme.colorScheme.outline
+                        paused -> Color(0xFFE6A100)
+                        else -> Color(0xFF2E9E5B)
+                    }
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
+                    Spacer(Modifier.width(6.dp))
+                    Text(modeLabel(snapshot.mode), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            if (active) {
+                FilledTonalButton(onClick = onStop, colors = ButtonDefaults.filledTonalButtonColors(containerColor = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer),
+                    contentPadding = PaddingValues(horizontal = 14.dp)) { Icon(AppIcons.Stop, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("停止") }
+            } else {
+                AssistChip(onClick = {}, enabled = false, label = { Text(if (allowed) "已授权" else "未授权") },
+                    leadingIcon = { Icon(if (allowed) Icons.Rounded.CheckCircle else Icons.Rounded.Warning, null, Modifier.size(16.dp)) },
+                    colors = AssistChipDefaults.assistChipColors(
+                        disabledLabelColor = if (allowed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        disabledLeadingIconContentColor = if (allowed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error))
             }
         }
     }
 }
 
 @Composable
-private fun SavedPointRow(item: SavedPoint, onChoose: () -> Unit, onDelete: (() -> Unit)?, onRename: (() -> Unit)?) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f).clickable(onClick = onChoose)) {
-            Text(item.name)
-            Text(item.point.toString(), style = MaterialTheme.typography.bodySmall)
+private fun PermissionBanner(onOpen: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Warning, null)
+            Spacer(Modifier.width(12.dp))
+            Text("需先开启开发者选项，并将“选择模拟位置信息应用”设为安卓改定位。返回此页会自动重新检查。",
+                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onOpen) { Text("去设置") }
         }
-        TextButton(onClick = onChoose) { Text("选取") }
-        if (onRename != null) TextButton(onClick = onRename) { Text("改名") }
-        if (onDelete != null) TextButton(onClick = onDelete) { Text("删除") }
+    }
+}
+
+@Composable
+private fun MapPane(modifier: Modifier, selected: Point, submitted: Point?, route: List<Point>, favorites: List<Point>, centerRequest: Int,
+                    onSelect: (Point) -> Unit, onCenter: () -> Unit, hint: String) {
+    Box(modifier.fillMaxWidth()) {
+        NativeMap(selected, submitted, route, favorites, centerRequest, onSelect, Modifier.fillMaxSize())
+        Surface(Modifier.align(Alignment.TopStart).padding(12.dp), shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f), shadowElevation = 2.dp) {
+            Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Place, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(6.dp))
+                Text(hint, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        SmallFloatingActionButton(onClick = onCenter, Modifier.align(Alignment.BottomEnd).padding(12.dp),
+            containerColor = MaterialTheme.colorScheme.surface, contentColor = MaterialTheme.colorScheme.primary) {
+            Icon(AppIcons.MyLocation, "地图中心移至选点")
+        }
+        Text(MapSources.ATTRIBUTION, Modifier.align(Alignment.BottomStart).padding(6.dp).background(Color.White.copy(alpha = 0.8f), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp),
+            style = MaterialTheme.typography.labelSmall, color = Color(0xFF333333))
+    }
+}
+
+@Composable
+private fun ControlPanel(content: @Composable ColumnScope.() -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shadowElevation = 6.dp, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
+    }
+}
+
+@Composable
+private fun PanelCard(content: @Composable ColumnScope.() -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp), content = content)
+    }
+}
+
+@Composable
+private fun SectionTitle(title: String, trailing: String?) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+        if (trailing != null) Text(trailing, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun EmptyHint(text: String) {
+    Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 4.dp))
+}
+
+@Composable
+private fun StopButton(onClick: () -> Unit) {
+    FilledIconButton(onClick = onClick, Modifier.size(48.dp), colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError)) {
+        Icon(AppIcons.Stop, "停止")
+    }
+}
+
+@Composable
+private fun SubmittedLine(snapshot: SessionSnapshot) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(AppIcons.MyLocation, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(6.dp))
+        Text("已提交：${snapshot.submitted ?: "无"} · ${snapshot.result}", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun RouteProgressBar(metres: Double, remaining: Double) {
+    val total = metres + remaining
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        LinearProgressIndicator(progress = { if (total > 0) (metres / total).toFloat() else 0f }, Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)))
+        Text("已走 %.1f 米 · 剩余 %.1f 米".format(Locale.US, metres, remaining), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun WaypointRow(index: Int, point: Point, lastIndex: Int, onUp: () -> Unit, onDown: () -> Unit, onDelete: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(26.dp).clip(CircleShape).background(
+            when (index) { 0 -> MaterialTheme.colorScheme.tertiary; lastIndex -> MaterialTheme.colorScheme.error; else -> MaterialTheme.colorScheme.primary }),
+            contentAlignment = Alignment.Center) {
+            Text("${index + 1}", style = MaterialTheme.typography.labelMedium, color = Color.White)
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(point.toString(), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
+        IconButton(onClick = onUp, enabled = index > 0, modifier = Modifier.size(36.dp)) { Icon(Icons.Rounded.KeyboardArrowUp, "上移") }
+        IconButton(onClick = onDown, enabled = index < lastIndex, modifier = Modifier.size(36.dp)) { Icon(Icons.Rounded.KeyboardArrowDown, "下移") }
+        IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) { Icon(Icons.Rounded.Close, "删除") }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SavedScreen(store: Store, refresh: Int, selected: Point, submitted: Point?, name: String, onName: (String) -> Unit,
+                        onChanged: () -> Unit, notify: (String) -> Unit, onChoose: (Point) -> Unit, onLoadRoute: (SavedRoute) -> Unit) {
+    val favorites = remember(refresh) { store.points("favorites") }
+    val history = remember(refresh) { store.points("history") }
+    val routes = remember(refresh) { store.routes() }
+    var section by rememberSaveable { mutableIntStateOf(0) }
+    var renaming by remember { mutableStateOf<SavedPoint?>(null) }
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedTextField(name, onName, label = { Text("收藏名称") }, leadingIcon = { Icon(Icons.Rounded.Edit, null) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { store.addPoint("favorites", name.ifBlank { "收藏地点" }, selected); onChanged(); notify("已收藏") }, Modifier.weight(1f)) {
+                    Icon(Icons.Rounded.Star, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("收藏选点")
+                }
+                OutlinedButton(onClick = {
+                    if (submitted != null) { store.addPoint("favorites", name.ifBlank { "当前模拟位置" }, submitted); onChanged(); notify("已收藏") }
+                }, enabled = submitted != null, modifier = Modifier.weight(1f)) { Text("收藏当前位置") }
+            }
+            Text("收藏和历史均保存 WGS-84 坐标", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        PrimaryTabRow(selectedTabIndex = section) {
+            listOf("收藏 ${favorites.size}", "历史 ${history.size}", "路线 ${routes.size}").forEachIndexed { index, title ->
+                Tab(selected = section == index, onClick = { section = index }, text = { Text(title) })
+            }
+        }
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            when (section) {
+                0 -> {
+                    emptyItem(favorites.isEmpty(), "还没有收藏。选好地点后点击“收藏选点”。")
+                    items(favorites, key = { "f${it.id}" }) { item ->
+                        SavedItemCard(Icons.Rounded.Star, item.name, item.point.toString(), onClick = { onChoose(item.point) }) {
+                            IconButton(onClick = { renaming = item }) { Icon(Icons.Rounded.Edit, "改名") }
+                            IconButton(onClick = { store.delete("favorites", item.id); onChanged() }) { Icon(Icons.Rounded.Delete, "删除") }
+                        }
+                    }
+                }
+                1 -> {
+                    emptyItem(history.isEmpty(), "开始模拟后，位置会自动记录到这里。")
+                    items(history, key = { "h${it.id}" }) { item ->
+                        SavedItemCard(AppIcons.History, item.name, "${item.point} · ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(item.created))}", onClick = { onChoose(item.point) }) {
+                            IconButton(onClick = { onChoose(item.point) }) { Icon(AppIcons.MyLocation, "选取") }
+                        }
+                    }
+                }
+                else -> {
+                    emptyItem(routes.isEmpty(), "在“路线”页添加途经点后可保存路线。")
+                    items(routes, key = { "r${it.id}" }) { item ->
+                        SavedItemCard(AppIcons.Route, item.name, "${item.points.size} 个途经点", onClick = { onLoadRoute(item) }) {
+                            IconButton(onClick = { onLoadRoute(item) }) { Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "加载") }
+                            IconButton(onClick = { store.delete("routes", item.id); onChanged() }) { Icon(Icons.Rounded.Delete, "删除") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    renaming?.let { item ->
+        var newName by remember(item.id) { mutableStateOf(item.name) }
+        AlertDialog(onDismissRequest = { renaming = null }, title = { Text("重命名收藏") },
+            text = { OutlinedTextField(newName, { newName = it }, singleLine = true, modifier = Modifier.fillMaxWidth()) },
+            confirmButton = { TextButton(onClick = { store.renameFavorite(item.id, newName.ifBlank { item.name }); onChanged(); renaming = null }) { Text("保存") } },
+            dismissButton = { TextButton(onClick = { renaming = null }) { Text("取消") } })
+    }
+}
+
+private fun LazyListScope.emptyItem(show: Boolean, text: String) {
+    if (show) item { Box(Modifier.fillMaxWidth().padding(vertical = 32.dp), contentAlignment = Alignment.Center) { EmptyHint(text) } }
+}
+
+@Composable
+private fun SavedItemCard(icon: ImageVector, title: String, subtitle: String, onClick: () -> Unit, actions: @Composable RowScope.() -> Unit) {
+    Card(Modifier.fillMaxWidth().clickable(onClick = onClick), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+        Row(Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
+                Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            actions()
+        }
     }
 }
 
 @Composable
 private fun JoystickControls(speed: String, onDirection: (Double) -> Unit, onRelease: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        listOf(listOf(null, 315.0, 0.0, 45.0, null), listOf(null, 270.0, null, 90.0, null), listOf(null, 225.0, 180.0, 135.0, null)).forEach { row ->
-            Row {
-                row.forEach { bearing ->
-                    if (bearing == null) Spacer(Modifier.size(48.dp))
-                    else Box(Modifier.size(48.dp).padding(2.dp).background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(8.dp))
-                        .pointerInput(bearing, speed) {
-                            detectTapGestures(onPress = {
-                                onDirection(bearing)
-                                try { tryAwaitRelease() } finally { onRelease() }
-                            })
-                        }, contentAlignment = Alignment.Center) {
-                        Text(when (bearing.toInt()) { 0 -> "↑"; 45 -> "↗"; 90 -> "→"; 135 -> "↘"; 180 -> "↓"; 225 -> "↙"; 270 -> "←"; else -> "↖" })
+    var pressed by remember { mutableStateOf<Double?>(null) }
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(Modifier.size(200.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+            Column {
+                listOf(listOf(315.0, 0.0, 45.0), listOf(270.0, null, 90.0), listOf(225.0, 180.0, 135.0)).forEach { row ->
+                    Row {
+                        row.forEach { bearing ->
+                            if (bearing == null) Box(Modifier.size(60.dp), contentAlignment = Alignment.Center) {
+                                Text("$speed\nm/s", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                            }
+                            else Box(Modifier.size(60.dp).padding(4.dp).clip(CircleShape)
+                                .background(if (pressed == bearing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer)
+                                .pointerInput(bearing, speed) {
+                                    detectTapGestures(onPress = {
+                                        pressed = bearing
+                                        onDirection(bearing)
+                                        try { tryAwaitRelease() } finally { pressed = null; onRelease() }
+                                    })
+                                }, contentAlignment = Alignment.Center) {
+                                Icon(AppIcons.ArrowUpward, null, Modifier.rotate(bearing.toFloat()),
+                                    tint = if (pressed == bearing) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer)
+                            }
+                        }
                     }
                 }
             }
@@ -281,30 +530,49 @@ private fun JoystickControls(speed: String, onDirection: (Double) -> Unit, onRel
 }
 
 @Composable
-private fun Diagnostics(allowed: Boolean, selected: Point, snapshot: SessionSnapshot, activity: MainActivity) {
+private fun Diagnostics(allowed: Boolean, selected: Point, snapshot: SessionSnapshot, onOpenSettings: () -> Unit, notify: (String) -> Unit) {
     val context = LocalContext.current
-    val report = buildString {
-        appendLine("设备：${Build.BRAND} ${Build.MODEL}")
-        appendLine("Android：${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
-        appendLine("模拟定位授权：${if (allowed) "允许" else "未授权"}")
-        appendLine("会话：${snapshot.mode}，前台服务：${snapshot.serviceRunning}")
-        appendLine("地图选中：$selected")
-        appendLine("引擎目标：${snapshot.target ?: "无"}")
-        appendLine("GPS 提交：${snapshot.submitted ?: "无"}")
-        appendLine("提交时间：${if (snapshot.submittedAt == 0L) "无" else DateFormat.getDateTimeInstance().format(Date(snapshot.submittedAt))}")
-        appendLine("API 结果：${snapshot.result}")
-        appendLine("异常：${snapshot.error.ifBlank { "无" }}")
-        appendLine("独立定位读取程序结果：待单独测试")
-        appendLine("第三方 App 显示：待人工测试")
+    val version = remember {
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).let { "${it.versionName} (${it.longVersionCode})" } }.getOrDefault("未知")
     }
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Text("诊断", style = MaterialTheme.typography.titleLarge)
-        Text(report)
+    val rows = listOf(
+        "应用版本" to version,
+        "设备" to "${Build.BRAND} ${Build.MODEL}",
+        "Android" to "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+        "模拟定位授权" to if (allowed) "允许" else "未授权",
+        "会话" to "${snapshot.mode}，前台服务：${snapshot.serviceRunning}",
+        "地图选中" to "$selected",
+        "引擎目标" to "${snapshot.target ?: "无"}",
+        "GPS 提交" to "${snapshot.submitted ?: "无"}",
+        "提交时间" to if (snapshot.submittedAt == 0L) "无" else DateFormat.getDateTimeInstance().format(Date(snapshot.submittedAt)),
+        "API 结果" to snapshot.result,
+        "异常" to snapshot.error.ifBlank { "无" },
+        "独立定位读取程序结果" to "待单独测试",
+        "第三方 App 显示" to "待人工测试"
+    )
+    val report = rows.joinToString("\n", postfix = "\n") { (label, value) -> "$label：$value" }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        PanelCard {
+            SectionTitle("诊断信息", if (snapshot.error.isBlank()) "运行正常" else "有异常")
+            rows.forEachIndexed { index, (label, value) ->
+                if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                    Text(label, Modifier.width(110.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(value, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                        color = if (label == "异常" && snapshot.error.isNotBlank()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+                }
+            }
+        }
         Button(onClick = {
             context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("定位诊断", report))
-        }) { Text("复制诊断信息") }
-        OutlinedButton(onClick = { activity.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) }) { Text("打开模拟定位授权设置") }
-        Text("系统 GPS 提交成功不代表微信采用该位置；请按测试清单分别验证。", style = MaterialTheme.typography.bodySmall)
+            notify("诊断信息已复制")
+        }, Modifier.fillMaxWidth()) { Icon(AppIcons.ContentCopy, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("复制诊断信息") }
+        OutlinedButton(onClick = onOpenSettings, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.Settings, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("打开模拟定位授权设置") }
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.secondaryContainer).padding(12.dp)) {
+            Icon(Icons.Rounded.Info, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
+            Spacer(Modifier.width(8.dp))
+            Text("系统 GPS 提交成功不代表微信采用该位置；请按测试清单分别验证。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
+        }
     }
 }
 
@@ -313,6 +581,7 @@ private fun NativeMap(selected: Point, submitted: Point?, route: List<Point>, fa
     val context = LocalContext.current
     val owner = LocalLifecycleOwner.current
     val latestSelect by rememberUpdatedState(onSelect)
+    val routeColor = MaterialTheme.colorScheme.primary.toArgb()
     val mapView = remember { MapView(context).apply { onCreate(null) } }
     var map by remember { mutableStateOf<MapLibreMap?>(null) }
     var ready by remember { mutableStateOf(false) }
@@ -334,6 +603,9 @@ private fun NativeMap(selected: Point, submitted: Point?, route: List<Point>, fa
             map = loaded
             val center = Coordinates.toMap(selected, MapSources.coordinateSystem)
             loaded.cameraPosition = CameraPosition.Builder().target(LatLng(center.lat, center.lon)).zoom(13.0).build()
+            loaded.uiSettings.isAttributionEnabled = false
+            loaded.uiSettings.isLogoEnabled = false
+            loaded.uiSettings.setCompassMargins(0, 160, 24, 0)
             loaded.setStyle(MapSources.STYLE_URL) { ready = true }
             loaded.addOnMapClickListener { position -> latestSelect(Coordinates.fromMap(Point(position.latitude, position.longitude), MapSources.coordinateSystem)); true }
         }
@@ -348,7 +620,7 @@ private fun NativeMap(selected: Point, submitted: Point?, route: List<Point>, fa
         submitted?.let { m.addMarker(MarkerOptions().position(mapPoint(it)).title("最近提交")) }
         route.forEachIndexed { index, point -> m.addMarker(MarkerOptions().position(mapPoint(point)).title("途经点 ${index + 1}")) }
         favorites.forEach { m.addMarker(MarkerOptions().position(mapPoint(it)).title("收藏位置")) }
-        if (route.size >= 2) m.addPolyline(PolylineOptions().addAll(route.map(::mapPoint)).color(android.graphics.Color.BLUE).width(4f))
+        if (route.size >= 2) m.addPolyline(PolylineOptions().addAll(route.map(::mapPoint)).color(routeColor).width(5f))
     }
     LaunchedEffect(map, ready, centerRequest) {
         val m = map ?: return@LaunchedEffect

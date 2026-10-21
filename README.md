@@ -7,6 +7,7 @@
 - `app/`：主 App，固定位置、手动路线、虚拟摇杆、收藏与历史、诊断和前台服务。
 - `probe/`：独立 GPS 读取测试 App，包名与主 App 不同，用来验证系统是否真正提供模拟坐标。
 - `docs/`：旧项目审查、使用和测试记录。
+- `CHANGELOG.md`：版本更新日志与版本号规则。
 
 地图使用 MapLibre Native Android 和 OpenFreeMap Liberty 样式，界面显示 OpenStreetMap 与 OpenFreeMap 署名。地图瓦片需要联网；正式分发时请评估地图服务的可用性和[使用条款](https://openfreemap.org/tos/)。内部坐标一律为 WGS-84，地图边界集中处理坐标转换。
 
