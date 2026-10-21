@@ -72,16 +72,19 @@ object MapSources {
 
 class MainActivity : ComponentActivity() {
     private var mockAllowed by mutableStateOf(false)
+    /** Bumped on every resume so setup checks re-read after returning from a settings page. */
+    private var resumes by mutableIntStateOf(0)
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         MapLibre.getInstance(this)
         mockAllowed = Session.mockAllowed(this)
-        setContent { AppTheme { App(mockAllowed, this) } }
+        setContent { AppTheme { App(mockAllowed, resumes) } }
     }
     override fun onResume() {
         super.onResume()
         mockAllowed = Session.mockAllowed(this)
+        resumes++
     }
 }
 
@@ -96,7 +99,7 @@ private val destinations = listOf(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun App(allowed: Boolean, activity: MainActivity) {
+private fun App(allowed: Boolean, resumes: Int) {
     val context = LocalContext.current
     val snapshot by Session.state.collectAsState()
     val store = remember { Store(context) }
@@ -110,6 +113,7 @@ private fun App(allowed: Boolean, activity: MainActivity) {
     var routeName by remember { mutableStateOf("") }
     var favoriteName by remember { mutableStateOf("") }
     var centerRequest by remember { mutableIntStateOf(0) }
+    var showSetup by rememberSaveable { mutableStateOf(!Prefs.get(context, Prefs.SETUP_SEEN) || !DeviceSetup.requiredDone(context)) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     DisposableEffect(store) { onDispose { store.close() } }
@@ -127,12 +131,17 @@ private fun App(allowed: Boolean, activity: MainActivity) {
     fun parsedPoint(): Point? = Point(latitude.toDoubleOrNull() ?: Double.NaN, longitude.toDoubleOrNull() ?: Double.NaN).takeIf { it.valid() }
     fun parsedSpeed(): Double? = speedText.toDoubleOrNull()?.takeIf { it in 0.1..100.0 }
     fun begin(action: () -> Unit) {
-        if (!allowed) { notify("请先在开发者选项中选择本应用为模拟位置信息应用"); return }
+        if (!allowed) { notify("请先在开发者选项中选择本应用为模拟位置信息应用"); showSetup = true; return }
+        if (!DeviceSetup.locationEnabled(context)) notify("系统“位置信息”开关已关闭，其他 App 将读不到模拟位置")
         if (Build.VERSION.SDK_INT >= 33) notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        try { action(); notify("已发送定位指令，请查看状态与诊断页") }
+        try { action(); if (DeviceSetup.locationEnabled(context)) notify("已发送定位指令，请查看状态与诊断页") }
         catch (e: Exception) { notify(e.message ?: "操作失败") }
     }
-    fun openDeveloperSettings() = activity.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+    fun openDeveloperSettings() {
+        if (!DeviceSetup.developerOptionsEnabled(context)) notify("请先连续点击“版本号”7 次打开开发人员选项")
+        DeviceSetup.openDeveloperSettings(context)
+    }
+    if (showSetup) SetupGuide(resumes) { Prefs.set(context, Prefs.SETUP_SEEN, true); showSetup = false }
     val favoritePoints = remember(refresh) { store.points("favorites").map { it.point } }
 
     Scaffold(
@@ -149,7 +158,7 @@ private fun App(allowed: Boolean, activity: MainActivity) {
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
-            AnimatedVisibility(!allowed) { PermissionBanner(onOpen = ::openDeveloperSettings) }
+            AnimatedVisibility(!allowed) { PermissionBanner(onOpen = { showSetup = true }) }
             when (tab) {
                 0 -> {
                     MapPane(Modifier.weight(1f), selected, snapshot.submitted, waypoints.toList(), favoritePoints, centerRequest,
@@ -258,7 +267,7 @@ private fun App(allowed: Boolean, activity: MainActivity) {
                     onChanged = { refresh++ }, notify = ::notify,
                     onChoose = { choose(it); tab = 0 },
                     onLoadRoute = { route -> waypoints.clear(); waypoints.addAll(route.points); choose(route.points.first()); tab = 1 })
-                else -> Diagnostics(allowed, selected, snapshot, onOpenSettings = ::openDeveloperSettings, notify = ::notify)
+                else -> Diagnostics(allowed, selected, snapshot, resumes, onOpenSettings = ::openDeveloperSettings, onOpenSetup = { showSetup = true }, notify = ::notify)
             }
         }
     }
@@ -312,9 +321,9 @@ private fun PermissionBanner(onOpen: () -> Unit) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Rounded.Warning, null)
             Spacer(Modifier.width(12.dp))
-            Text("需先开启开发者选项，并将“选择模拟位置信息应用”设为安卓改定位。返回此页会自动重新检查。",
+            Text("尚未授权模拟定位：需打开开发人员选项，并把“选择模拟位置信息应用”设为安卓改定位。",
                 Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = onOpen) { Text("去设置") }
+            TextButton(onClick = onOpen) { Text("配置向导") }
         }
     }
 }
@@ -530,17 +539,30 @@ private fun JoystickControls(speed: String, onDirection: (Double) -> Unit, onRel
 }
 
 @Composable
-private fun Diagnostics(allowed: Boolean, selected: Point, snapshot: SessionSnapshot, onOpenSettings: () -> Unit, notify: (String) -> Unit) {
+private fun Diagnostics(allowed: Boolean, selected: Point, snapshot: SessionSnapshot, resumes: Int,
+                        onOpenSettings: () -> Unit, onOpenSetup: () -> Unit, notify: (String) -> Unit) {
     val context = LocalContext.current
+    var mockNetwork by remember { mutableStateOf(Prefs.mockNetwork(context)) }
+    val checks = remember(resumes) {
+        Triple(DeviceSetup.locationEnabled(context), DeviceSetup.notificationsEnabled(context), DeviceSetup.ignoringBatteryOptimizations(context))
+    }
     val version = remember {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).let { "${it.versionName} (${it.longVersionCode})" } }.getOrDefault("未知")
     }
     val rows = listOf(
         "应用版本" to version,
         "设备" to "${Build.BRAND} ${Build.MODEL}",
-        "Android" to "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+        "系统" to DeviceSetup.systemLabel(),
         "模拟定位授权" to if (allowed) "允许" else "未授权",
+        "系统位置开关" to if (checks.first) "开启" else "关闭",
+        "通知" to if (checks.second) "允许" else "关闭",
+        "后台运行" to if (checks.third) "已忽略电池优化" else "受电池优化限制",
         "会话" to "${snapshot.mode}，前台服务：${snapshot.serviceRunning}",
+        "模拟提供者" to when {
+            !snapshot.serviceRunning -> if (mockNetwork) "GPS + 网络（待启动）" else "仅 GPS（待启动）"
+            snapshot.networkMocked -> "GPS + 网络"
+            else -> "仅 GPS"
+        },
         "地图选中" to "$selected",
         "引擎目标" to "${snapshot.target ?: "无"}",
         "GPS 提交" to "${snapshot.submitted ?: "无"}",
@@ -567,11 +589,23 @@ private fun Diagnostics(allowed: Boolean, selected: Point, snapshot: SessionSnap
             context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("定位诊断", report))
             notify("诊断信息已复制")
         }, Modifier.fillMaxWidth()) { Icon(AppIcons.ContentCopy, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("复制诊断信息") }
+        PanelCard {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("同时模拟网络定位", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                    Text("推荐开启。华为等无谷歌服务的手机上，很多 App 优先使用网络定位；关闭后室内可能跳回真实位置。下次开始模拟时生效。",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(checked = mockNetwork, onCheckedChange = { mockNetwork = it; Prefs.set(context, Prefs.MOCK_NETWORK, it) })
+            }
+        }
+        FilledTonalButton(onClick = onOpenSetup, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.CheckCircle, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("首次配置向导") }
         OutlinedButton(onClick = onOpenSettings, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.Settings, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("打开模拟定位授权设置") }
         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.secondaryContainer).padding(12.dp)) {
             Icon(Icons.Rounded.Info, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
             Spacer(Modifier.width(8.dp))
-            Text("系统 GPS 提交成功不代表微信采用该位置；请按测试清单分别验证。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
+            Text("系统 GPS 提交成功不代表微信等 App 采用该位置；部分 App 用自带的网络定位或会检测模拟位置，请按测试清单分别验证。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
         }
     }
 }
