@@ -4,7 +4,7 @@ import android.app.Instrumentation
 import android.content.Context
 import android.location.Location
 import android.location.LocationManager
-import android.location.provider.ProviderProperties
+import android.os.Build
 import android.os.SystemClock
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -26,18 +26,16 @@ class MockLocationIntegrationTest {
 
     @Test fun createSubmitAndRemoveGpsProvider() {
         assumeTrue("Select this app as mock-location app first", Session.mockAllowed(context))
-        val properties = ProviderProperties.Builder().setAccuracy(ProviderProperties.ACCURACY_FINE)
-            .setPowerUsage(ProviderProperties.POWER_USAGE_LOW).build()
-        manager.addTestProvider(LocationManager.GPS_PROVIDER, properties)
+        MockProviders.add(manager, LocationManager.GPS_PROVIDER)
         try {
-            manager.setTestProviderEnabled(LocationManager.GPS_PROVIDER, true)
             manager.setTestProviderLocation(LocationManager.GPS_PROVIDER, Location(LocationManager.GPS_PROVIDER).apply {
                 latitude = 39.9042; longitude = 116.4074; accuracy = 3f
                 time = System.currentTimeMillis(); elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
             })
         } finally {
             manager.removeTestProvider(LocationManager.GPS_PROVIDER)
-            manager.removeTestProvider(LocationManager.GPS_PROVIDER) // idempotent cleanup
+            // Idempotent from Android 12; Android 10/11 (HarmonyOS 2/3) throw for an unknown test provider.
+            if (Build.VERSION.SDK_INT >= 31) manager.removeTestProvider(LocationManager.GPS_PROVIDER)
         }
     }
 

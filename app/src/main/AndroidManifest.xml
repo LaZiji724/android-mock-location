@@ -5,6 +5,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Keeps the 1 s mock ticker running with the screen off; held only while a session is active. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Lets the setup guide show the system "allow background running" dialog (Huawei/Honor honour it). -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- This app is a user-selected mock GPS utility in every build, not a production location reader.
          Keep the declaration so developer settings can list it; AppOps still gates every session. -->
     <uses-permission android:name="android.permission.ACCESS_MOCK_LOCATION" tools:ignore="MockLocation" />

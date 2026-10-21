@@ -1,5 +1,6 @@
 package com.example.androidmocklocation
 
+import android.annotation.SuppressLint
 import android.app.AppOpsManager
 import android.app.Notification
 import android.app.NotificationChannel
@@ -9,13 +10,16 @@ import android.app.Service
 import android.content.pm.ServiceInfo
 import android.content.Context
 import android.content.Intent
+import android.location.Criteria
 import android.location.Location
 import android.location.LocationManager
 import android.location.provider.ProviderProperties
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.os.Process
 import android.os.SystemClock
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,8 +43,45 @@ data class SessionSnapshot(
     val routeMetres: Double = 0.0,
     val routeRemaining: Double = 0.0,
     val canResumeRoute: Boolean = false,
-    val historyRevision: Long = 0
+    val historyRevision: Long = 0,
+    val networkMocked: Boolean = false
 )
+
+/**
+ * Test providers across API levels. Android 12 introduced [ProviderProperties]; HarmonyOS 2/3 phones such as
+ * the nova 5z run an Android 10 base and only offer the older boolean overload.
+ */
+object MockProviders {
+    fun add(manager: LocationManager, name: String) {
+        val network = name == LocationManager.NETWORK_PROVIDER
+        if (Build.VERSION.SDK_INT >= 31) addWithProperties(manager, name, network)
+        else addLegacy(manager, name, network)
+        manager.setTestProviderEnabled(name, true)
+    }
+
+    /** Criteria.POWER_LOW / ACCURACY_* share their values with the ProviderProperties constants lint expects here. */
+    @SuppressLint("WrongConstant")
+    @Suppress("DEPRECATION")
+    private fun addLegacy(manager: LocationManager, name: String, network: Boolean) {
+        manager.addTestProvider(name, network, !network, network, false, !network, true, true,
+            Criteria.POWER_LOW, if (network) Criteria.ACCURACY_COARSE else Criteria.ACCURACY_FINE)
+    }
+
+    @RequiresApi(31)
+    private fun addWithProperties(manager: LocationManager, name: String, network: Boolean) {
+        val properties = ProviderProperties.Builder()
+            .setAccuracy(if (network) ProviderProperties.ACCURACY_COARSE else ProviderProperties.ACCURACY_FINE)
+            .setPowerUsage(ProviderProperties.POWER_USAGE_LOW)
+            .setHasNetworkRequirement(network)
+            .setHasCellRequirement(network)
+            .setHasSatelliteRequirement(!network)
+            .setHasAltitudeSupport(!network)
+            .setHasSpeedSupport(true)
+            .setHasBearingSupport(true)
+            .build()
+        manager.addTestProvider(name, properties)
+    }
+}
 
 object Session {
     private val mutable = MutableStateFlow(SessionSnapshot())
@@ -75,11 +116,14 @@ class MockLocationService : Service() {
         const val STOP = "stop"
         private const val CHANNEL = "mock_location_session"
         private const val NOTIFICATION = 18272
+        private const val WAKE_TIMEOUT_MS = 2 * 60 * 1000L
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var manager: LocationManager
     private var ticker: Job? = null
     private var providerOwned = false
+    private var networkOwned = false
+    private lateinit var wakeLock: PowerManager.WakeLock
     private var current = Point(39.9042, 116.4074)
     private var route: RouteProgress? = null
     private var steeringBearing = 0.0
@@ -93,6 +137,9 @@ class MockLocationService : Service() {
     override fun onCreate() {
         super.onCreate()
         manager = getSystemService(LocationManager::class.java)
+        // Without a CPU wake lock the 1 s ticker stalls once the screen is off, and route/joystick sessions freeze.
+        wakeLock = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AndroidMockLocation:session").apply { setReferenceCounted(false) }
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "模拟定位运行状态", NotificationManager.IMPORTANCE_LOW)
         )
@@ -190,16 +237,31 @@ class MockLocationService : Service() {
     private fun readPoint(intent: Intent) = Point(intent.getDoubleExtra("lat", current.lat), intent.getDoubleExtra("lon", current.lon))
     private fun prepareProvider() {
         if (providerOwned) return
-        val properties = ProviderProperties.Builder()
-            .setAccuracy(ProviderProperties.ACCURACY_FINE)
-            .setPowerUsage(ProviderProperties.POWER_USAGE_LOW)
-            .setHasAltitudeSupport(true)
-            .setHasSpeedSupport(true)
-            .setHasBearingSupport(true)
-            .build()
-        manager.addTestProvider(LocationManager.GPS_PROVIDER, properties)
+        MockProviders.add(manager, LocationManager.GPS_PROVIDER)
         providerOwned = true
-        manager.setTestProviderEnabled(LocationManager.GPS_PROVIDER, true)
+        // Huawei phones without GMS answer most app requests from the network provider (HMS network location),
+        // so a GPS-only mock makes apps jump back to the real position indoors. Best effort: GPS alone still works.
+        if (Prefs.mockNetwork(this)) {
+            try {
+                MockProviders.add(manager, LocationManager.NETWORK_PROVIDER)
+                networkOwned = true
+            } catch (e: Exception) {
+                Session.update { it.copy(error = "网络定位模拟不可用，仅模拟 GPS：${e.message ?: e.javaClass.simpleName}") }
+            }
+        }
+        wakeLock.acquire(WAKE_TIMEOUT_MS)
+    }
+    private fun removeProviders(report: Boolean) {
+        if (networkOwned) {
+            try { manager.removeTestProvider(LocationManager.NETWORK_PROVIDER) } catch (_: Exception) { }
+            networkOwned = false
+        }
+        if (providerOwned) {
+            try { manager.removeTestProvider(LocationManager.GPS_PROVIDER) }
+            catch (e: Exception) { if (report) Session.update { it.copy(error = "清理提供者失败：${e.message}") } }
+            providerOwned = false
+        }
+        if (wakeLock.isHeld) wakeLock.release()
     }
     private fun ensureTicker() {
         if (ticker?.isActive == true) return
@@ -210,6 +272,7 @@ class MockLocationService : Service() {
                 val now = SystemClock.elapsedRealtimeNanos()
                 val dt = ((now - previous) / 1e9).coerceIn(0.0, 5.0)
                 previous = now
+                if (providerOwned) wakeLock.acquire(WAKE_TIMEOUT_MS)
                 if (!Session.mockAllowed(this@MockLocationService)) {
                     Session.update { it.copy(error = "模拟定位授权已撤销", result = "停止") }
                     stopSession(); break
@@ -233,21 +296,34 @@ class MockLocationService : Service() {
             }
         }
     }
+    private fun fix(provider: String, accuracyMetres: Float) = Location(provider).apply {
+        latitude = current.lat; longitude = current.lon
+        accuracy = accuracyMetres
+        time = System.currentTimeMillis()
+        elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+        altitude = 0.0
+        speed = if (moving) this@MockLocationService.speed.toFloat() else 0f
+        bearing = if (moving) heading.toFloat() else 0f
+        // Fused/HMS consumers on Android 8+ may drop fixes that lack these accuracy fields.
+        verticalAccuracyMeters = accuracyMetres * 2
+        speedAccuracyMetersPerSecond = 0.5f
+        bearingAccuracyDegrees = 10f
+    }
     private fun emit() {
         if (!providerOwned) return
-        val fix = Location(LocationManager.GPS_PROVIDER).apply {
-            latitude = current.lat; longitude = current.lon
-            accuracy = 3f
-            time = System.currentTimeMillis()
-            elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
-            altitude = 0.0
-            speed = if (moving) speed.toFloat() else 0f
-            bearing = if (moving) heading.toFloat() else 0f
-        }
+        val fix = fix(LocationManager.GPS_PROVIDER, 3f)
         manager.setTestProviderLocation(LocationManager.GPS_PROVIDER, fix)
+        if (networkOwned) {
+            try { manager.setTestProviderLocation(LocationManager.NETWORK_PROVIDER, fix(LocationManager.NETWORK_PROVIDER, 15f)) }
+            catch (e: Exception) {
+                networkOwned = false
+                try { manager.removeTestProvider(LocationManager.NETWORK_PROVIDER) } catch (_: Exception) { }
+                Session.update { it.copy(error = "网络定位模拟已停用：${e.message ?: e.javaClass.simpleName}") }
+            }
+        }
         Session.update {
             it.copy(mode = mode, target = current, submitted = current, submittedAt = fix.time,
-                result = "GPS 提交成功", serviceRunning = true,
+                result = if (networkOwned) "GPS + 网络定位提交成功" else "GPS 提交成功", serviceRunning = true, networkMocked = networkOwned,
                 routeMetres = route?.travelled ?: 0.0, routeRemaining = route?.remaining ?: 0.0,
                 canResumeRoute = route?.finished == false && mode != "ROUTE_RUNNING")
         }
@@ -292,23 +368,16 @@ class MockLocationService : Service() {
     private fun stopSession() {
         ticker?.cancel(); ticker = null
         steeringActive = false; route = null; moving = false; mode = "IDLE"
-        if (providerOwned) {
-            try { manager.removeTestProvider(LocationManager.GPS_PROVIDER) }
-            catch (e: Exception) { Session.update { it.copy(error = "清理提供者失败：${e.message}") } }
-            providerOwned = false
-        }
-        Session.update { it.copy(mode = "IDLE", target = null, serviceRunning = false, canResumeRoute = false, routeMetres = 0.0, routeRemaining = 0.0) }
+        removeProviders(report = true)
+        Session.update { it.copy(mode = "IDLE", target = null, serviceRunning = false, networkMocked = false, canResumeRoute = false, routeMetres = 0.0, routeRemaining = 0.0) }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
     override fun onDestroy() {
         val interrupted = mode != "IDLE"
-        if (providerOwned) {
-            try { manager.removeTestProvider(LocationManager.GPS_PROVIDER) } catch (_: Exception) { }
-            providerOwned = false
-        }
+        removeProviders(report = false)
         scope.cancel()
-        Session.update { it.copy(mode = "IDLE", target = null, serviceRunning = false,
+        Session.update { it.copy(mode = "IDLE", target = null, serviceRunning = false, networkMocked = false,
             canResumeRoute = false, routeMetres = 0.0, routeRemaining = 0.0,
             error = if (interrupted) "服务被系统结束；请在应用内重新启动模拟" else it.error) }
         super.onDestroy()

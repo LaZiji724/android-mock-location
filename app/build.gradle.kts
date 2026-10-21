@@ -11,10 +11,10 @@ android {
 
     defaultConfig {
         applicationId = "com.example.androidmocklocation"
-        minSdk = 31
+        minSdk = 29
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.2.0"
+        versionCode = 4
+        versionName = "0.2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {
@@ -22,6 +22,17 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    // Optional shared key so each published APK installs over the previous one. Pass
+    // -PmockSigningStore=<jks> -PmockSigningPassword=<password>; without them the machine's debug key is used.
+    val sharedStore = providers.gradleProperty("mockSigningStore").orNull
+    if (sharedStore != null) {
+        val password = providers.gradleProperty("mockSigningPassword").get()
+        signingConfigs.create("shared") {
+            storeFile = file(sharedStore); storePassword = password
+            keyAlias = "mocklocation"; keyPassword = password
+        }
+        buildTypes.getByName("debug").signingConfig = signingConfigs.getByName("shared")
+    }
     buildFeatures { compose = true }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
