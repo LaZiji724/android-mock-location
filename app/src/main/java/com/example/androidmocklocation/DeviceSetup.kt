@@ -24,10 +24,18 @@ object Prefs {
     const val SETUP_SEEN = "setup_seen"
     const val CONFIRMED_APP_LAUNCH = "confirmed_app_launch"
     const val CONFIRMED_RECENTS_LOCK = "confirmed_recents_lock"
+    const val LAST_TARGET = "last_target"
     private fun of(context: Context) = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
     fun get(context: Context, key: String, default: Boolean = false) = of(context).getBoolean(key, default)
     fun set(context: Context, key: String, value: Boolean) = of(context).edit().putBoolean(key, value).apply()
     fun mockNetwork(context: Context) = get(context, MOCK_NETWORK, true)
+    /** Last target the user picked or typed, so a restarted process does not fall back to the default city. */
+    fun lastTarget(context: Context): Point? = of(context).getString(LAST_TARGET, null)
+        ?.split(',')?.mapNotNull { it.trim().toDoubleOrNull() }
+        ?.takeIf { it.size == 2 }?.let { Point(it[0], it[1]) }?.takeIf { it.valid() }
+    fun setLastTarget(context: Context, point: Point) {
+        of(context).edit().putString(LAST_TARGET, "${point.lat},${point.lon}").apply()
+    }
 }
 
 /**
