@@ -84,6 +84,9 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         mockAllowed = Session.mockAllowed(this)
+        // A session killed with its process leaves test providers behind, which keep feeding other apps the last fake fix.
+        // Checked on every resume: the app may have been opened before it was selected as the mock-location app.
+        if (mockAllowed && !Session.state.value.serviceRunning) Session.clearStaleProviders(this)
         resumes++
     }
 }
