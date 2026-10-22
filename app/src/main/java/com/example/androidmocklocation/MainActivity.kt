@@ -106,9 +106,9 @@ private fun App(allowed: Boolean, resumes: Int) {
     val context = LocalContext.current
     val snapshot by Session.state.collectAsState()
     val store = remember { Store(context) }
-    var selected by remember { mutableStateOf(Point(39.9042, 116.4074)) }
-    var latitude by remember { mutableStateOf("39.904200") }
-    var longitude by remember { mutableStateOf("116.407400") }
+    var selected by remember { mutableStateOf(Prefs.lastTarget(context) ?: Point(39.9042, 116.4074)) }
+    var latitude by remember { mutableStateOf(String.format(Locale.US, "%.6f", selected.lat)) }
+    var longitude by remember { mutableStateOf(String.format(Locale.US, "%.6f", selected.lon)) }
     var tab by remember { mutableIntStateOf(0) }
     val waypoints = remember { mutableStateListOf<Point>() }
     var speedText by remember { mutableStateOf("1.4") }
@@ -130,6 +130,7 @@ private fun App(allowed: Boolean, resumes: Int) {
         selected = point
         latitude = String.format(Locale.US, "%.6f", point.lat)
         longitude = String.format(Locale.US, "%.6f", point.lon)
+        Prefs.setLastTarget(context, point)
     }
     fun parsedPoint(): Point? = Point(latitude.toDoubleOrNull() ?: Double.NaN, longitude.toDoubleOrNull() ?: Double.NaN).takeIf { it.valid() }
     fun parsedSpeed(): Double? = speedText.toDoubleOrNull()?.takeIf { it in 0.1..100.0 }
@@ -572,8 +573,8 @@ private fun Diagnostics(allowed: Boolean, selected: Point, snapshot: SessionSnap
         "提交时间" to if (snapshot.submittedAt == 0L) "无" else DateFormat.getDateTimeInstance().format(Date(snapshot.submittedAt)),
         "API 结果" to snapshot.result,
         "异常" to snapshot.error.ifBlank { "无" },
-        "独立定位读取程序结果" to "待单独测试",
-        "第三方 App 显示" to "待人工测试"
+        "第三方 App 兼容性" to "地图类（高德等）通常采纳；微信不采纳",
+        "模拟位置标记" to "提交坐标带系统 mock 标记，普通应用无法隐藏"
     )
     val report = rows.joinToString("\n", postfix = "\n") { (label, value) -> "$label：$value" }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -603,12 +604,17 @@ private fun Diagnostics(allowed: Boolean, selected: Point, snapshot: SessionSnap
                 Switch(checked = mockNetwork, onCheckedChange = { mockNetwork = it; Prefs.set(context, Prefs.MOCK_NETWORK, it) })
             }
         }
+        PanelCard {
+            SectionTitle("已知限制", "目标 App 是否采纳由 App 决定")
+            Text("微信“发送位置/共享实时位置”使用腾讯自有定位（网络定位与融合），并会识别模拟位置；真机实测即使系统层已是模拟坐标，微信仍显示真实位置。本 App 只注入系统测试提供者，不修改微信、不隐藏模拟标记，因此无法影响微信定位。华为 HMS 定位类系统应用同样会丢弃模拟坐标；高德等走系统定位的地图 App 正常。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         FilledTonalButton(onClick = onOpenSetup, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.CheckCircle, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("首次配置向导") }
         OutlinedButton(onClick = onOpenSettings, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.Settings, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("打开模拟定位授权设置") }
         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.secondaryContainer).padding(12.dp)) {
             Icon(Icons.Rounded.Info, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
             Spacer(Modifier.width(8.dp))
-            Text("系统 GPS 提交成功不代表微信等 App 采用该位置；部分 App 用自带的网络定位或会检测模拟位置，请按测试清单分别验证。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
+            Text("系统 GPS 提交成功只代表系统层已注入。高德等走系统定位的地图 App 实测采纳；微信（腾讯自有定位）不采纳，见上方“已知限制”。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
         }
     }
 }
