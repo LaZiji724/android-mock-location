@@ -82,17 +82,30 @@ object DeviceSetup {
     fun ignoringBatteryOptimizations(context: Context) =
         context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
 
-    /** Starts the first intent the phone can resolve; vendor pages differ between EMUI, HarmonyOS and MagicOS releases. */
+    /**
+     * Starts the first intent the phone can resolve; vendor pages differ between EMUI, HarmonyOS and MagicOS releases.
+     * When none resolves it opens the app details page instead and returns false.
+     */
     fun open(context: Context, vararg intents: Intent): Boolean {
-        for (intent in intents.toList() + appDetails(context)) {
-            try {
-                context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                return true
-            } catch (_: ActivityNotFoundException) {
-            } catch (_: SecurityException) {
-            }
+        for (intent in intents) if (start(context, intent)) return true
+        start(context, appDetails(context))
+        return false
+    }
+
+    private fun start(context: Context, intent: Intent): Boolean {
+        try {
+            context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return true
+        } catch (_: ActivityNotFoundException) {
+        } catch (_: SecurityException) {
         }
         return false
+    }
+
+    /** Runs a setup step. The nova 5z (HarmonyOS 3) refuses every launch-management page to other apps, so say so instead of silently showing app info. */
+    fun launch(context: Context, step: SetupStep) {
+        if (!step.open(context)) android.widget.Toast.makeText(context,
+            "没能直接打开该设置页，已改为打开应用信息。请按卡片上的路径手动前往。", android.widget.Toast.LENGTH_LONG).show()
     }
 
     private fun appDetails(context: Context) =

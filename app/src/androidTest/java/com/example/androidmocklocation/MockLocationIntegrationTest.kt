@@ -39,6 +39,29 @@ class MockLocationIntegrationTest {
         }
     }
 
+    @Test fun addReplacesProviderLeftBehindByKilledSession() {
+        assumeTrue("Select this app as mock-location app first", Session.mockAllowed(context))
+        // A killed service never removes its test provider; Android 10/11 then reject a plain second addTestProvider.
+        MockProviders.add(manager, LocationManager.GPS_PROVIDER)
+        try {
+            MockProviders.add(manager, LocationManager.GPS_PROVIDER)
+            manager.setTestProviderLocation(LocationManager.GPS_PROVIDER, Location(LocationManager.GPS_PROVIDER).apply {
+                latitude = 39.9042; longitude = 116.4074; accuracy = 3f
+                time = System.currentTimeMillis(); elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
+            })
+        } finally {
+            MockProviders.remove(manager, LocationManager.GPS_PROVIDER)
+        }
+    }
+
+    @Test fun clearStaleProvidersRemovesLeftoverProviders() {
+        assumeTrue("Select this app as mock-location app first", Session.mockAllowed(context))
+        assumeTrue("Android 12+ ignores an unknown test provider, so removal cannot be observed", Build.VERSION.SDK_INT < 31)
+        MockProviders.add(manager, LocationManager.GPS_PROVIDER)
+        Session.clearStaleProviders(context)
+        assertThrows(Exception::class.java) { manager.removeTestProvider(LocationManager.GPS_PROVIDER) }
+    }
+
     @Test fun foregroundServiceFixedLocationAndStop() {
         assumeTrue("Select this app as mock-location app first", Session.mockAllowed(context))
         ActivityScenario.launch(MainActivity::class.java).use {

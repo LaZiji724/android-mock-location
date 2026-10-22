@@ -52,11 +52,27 @@ data class SessionSnapshot(
  * the nova 5z run an Android 10 base and only offer the older boolean overload.
  */
 object MockProviders {
+    /**
+     * Registers a test provider, replacing one left behind by a session the system killed before it could clean up.
+     * Android 10/11 keep such a provider registered and reject every later add with 'Provider "gps" already exists',
+     * so without this a single killed session made every following start fail.
+     */
     fun add(manager: LocationManager, name: String) {
+        try { register(manager, name) }
+        catch (_: Exception) { remove(manager, name); register(manager, name) }
+    }
+
+    /** Best effort: Android 10/11 throw for an unknown test provider, Android 12+ ignore it. */
+    fun remove(manager: LocationManager, name: String) {
+        try { manager.removeTestProvider(name) } catch (_: Exception) { }
+    }
+
+    private fun register(manager: LocationManager, name: String) {
         val network = name == LocationManager.NETWORK_PROVIDER
         if (Build.VERSION.SDK_INT >= 31) addWithProperties(manager, name, network)
         else addLegacy(manager, name, network)
-        manager.setTestProviderEnabled(name, true)
+        try { manager.setTestProviderEnabled(name, true) }
+        catch (e: Exception) { remove(manager, name); throw e }
     }
 
     /** Criteria.POWER_LOW / ACCURACY_* share their values with the ProviderProperties constants lint expects here. */
@@ -91,6 +107,12 @@ object Session {
         val ops = context.getSystemService(AppOpsManager::class.java)
         ops.checkOpNoThrow(AppOpsManager.OPSTR_MOCK_LOCATION, Process.myUid(), context.packageName) == AppOpsManager.MODE_ALLOWED
     } catch (_: Exception) { false }
+    /** Drops test providers no running session owns, e.g. left behind when the system killed the service. */
+    fun clearStaleProviders(context: Context) {
+        val manager = context.getSystemService(LocationManager::class.java)
+        MockProviders.remove(manager, LocationManager.GPS_PROVIDER)
+        MockProviders.remove(manager, LocationManager.NETWORK_PROVIDER)
+    }
     fun command(context: Context, action: String, point: Point? = null, speed: Double? = null, bearing: Double? = null, points: List<Point>? = null) {
         val intent = Intent(context, MockLocationService::class.java).setAction(action)
         point?.let { intent.putExtra("lat", it.lat).putExtra("lon", it.lon) }

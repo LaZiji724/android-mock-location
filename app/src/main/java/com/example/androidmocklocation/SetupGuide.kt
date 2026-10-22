@@ -55,7 +55,7 @@ fun SetupGuide(refresh: Int, onClose: () -> Unit) {
                     }
                     items(steps, key = { it.key }) { step ->
                         StepCard(steps.indexOf(step) + 1, step, manual[step.key] == true,
-                            onAction = { step.open(context) },
+                            onAction = { DeviceSetup.launch(context, step) },
                             onConfirm = { checked -> step.confirmKey?.let { Prefs.set(context, it, checked); confirmations++ } })
                     }
                 }

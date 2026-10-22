@@ -12,3 +12,4 @@ local.properties
 *.p12
 *.pfx
 .kotlin/
+.worktrees/
