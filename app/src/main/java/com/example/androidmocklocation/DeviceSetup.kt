@@ -25,6 +25,8 @@ object Prefs {
     const val CONFIRMED_APP_LAUNCH = "confirmed_app_launch"
     const val CONFIRMED_RECENTS_LOCK = "confirmed_recents_lock"
     const val LAST_TARGET = "last_target"
+    const val SHIELD_OBSERVE = "shield_observe"
+    const val SHIELD_BLOCK = "shield_block"
     private fun of(context: Context) = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
     fun get(context: Context, key: String, default: Boolean = false) = of(context).getBoolean(key, default)
     fun set(context: Context, key: String, value: Boolean) = of(context).edit().putBoolean(key, value).apply()

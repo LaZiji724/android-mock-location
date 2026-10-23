@@ -1,9 +1,11 @@
 package com.example.androidmocklocation
 
 import android.Manifest
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -547,6 +549,36 @@ private fun Diagnostics(allowed: Boolean, selected: Point, snapshot: SessionSnap
                         onOpenSettings: () -> Unit, onOpenSetup: () -> Unit, notify: (String) -> Unit) {
     val context = LocalContext.current
     var mockNetwork by remember { mutableStateOf(Prefs.mockNetwork(context)) }
+    var shieldObserve by remember { mutableStateOf(Prefs.get(context, Prefs.SHIELD_OBSERVE, false)) }
+    var shieldBlock by remember { mutableStateOf(Prefs.get(context, Prefs.SHIELD_BLOCK, false)) }
+    val shieldRunning by DnsShield.running.collectAsState()
+    val shieldBlocking by DnsShield.blocking.collectAsState()
+    val shieldTotal by DnsShield.total.collectAsState()
+    val shieldBlockedCount by DnsShield.blockedCount.collectAsState()
+    val shieldRecent by DnsShield.recent.collectAsState()
+    val vpnConsent = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            LocationShieldService.start(context, Prefs.get(context, Prefs.SHIELD_BLOCK, false))
+        } else {
+            shieldObserve = false
+            shieldBlock = false
+            Prefs.set(context, Prefs.SHIELD_OBSERVE, false)
+            Prefs.set(context, Prefs.SHIELD_BLOCK, false)
+            notify("未授予 VPN 权限，网络定位拦截未开启")
+        }
+    }
+    fun applyShield(observe: Boolean, block: Boolean) {
+        shieldObserve = observe
+        shieldBlock = block
+        Prefs.set(context, Prefs.SHIELD_OBSERVE, observe)
+        Prefs.set(context, Prefs.SHIELD_BLOCK, block)
+        if (!observe && !block) {
+            LocationShieldService.stop(context)
+            return
+        }
+        val consent = VpnService.prepare(context)
+        if (consent != null) vpnConsent.launch(consent) else LocationShieldService.start(context, block)
+    }
     val checks = remember(resumes) {
         Triple(DeviceSetup.locationEnabled(context), DeviceSetup.notificationsEnabled(context), DeviceSetup.ignoringBatteryOptimizations(context))
     }
@@ -573,7 +605,7 @@ private fun Diagnostics(allowed: Boolean, selected: Point, snapshot: SessionSnap
         "提交时间" to if (snapshot.submittedAt == 0L) "无" else DateFormat.getDateTimeInstance().format(Date(snapshot.submittedAt)),
         "API 结果" to snapshot.result,
         "异常" to snapshot.error.ifBlank { "无" },
-        "第三方 App 兼容性" to "地图类（高德等）通常采纳；微信不采纳",
+        "第三方 App 兼容性" to "地图类直接采纳；微信需开启网络定位拦截",
         "模拟位置标记" to "提交坐标带系统 mock 标记，普通应用无法隐藏"
     )
     val report = rows.joinToString("\n", postfix = "\n") { (label, value) -> "$label：$value" }
@@ -605,8 +637,51 @@ private fun Diagnostics(allowed: Boolean, selected: Point, snapshot: SessionSnap
             }
         }
         PanelCard {
-            SectionTitle("已知限制", "目标 App 是否采纳由 App 决定")
-            Text("微信“发送位置/共享实时位置”使用腾讯自有定位（网络定位与融合），并会识别模拟位置；真机实测即使系统层已是模拟坐标，微信仍显示真实位置。本 App 只注入系统测试提供者，不修改微信、不隐藏模拟标记，因此无法影响微信定位。华为 HMS 定位类系统应用同样会丢弃模拟坐标；高德等走系统定位的地图 App 正常。",
+            SectionTitle("网络定位拦截（微信模式）", when {
+                !shieldRunning -> "关闭"
+                shieldBlocking -> "拦截中"
+                else -> "仅记录"
+            })
+            Text("微信优先使用腾讯自己的 WiFi 网络定位，把系统模拟坐标压回真实位置。开启后本机只接管 DNS（其余流量照常走原网络）：只记录模式列出各 App 解析的域名；拦截模式让腾讯定位域名解析失败，逼微信回退到系统 GPS 模拟。真机验证（nova 5z + 微信 8.0.79）：开启拦截后微信“发送位置”“共享实时位置”均显示模拟坐标，聊天和地图瓦片正常。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("只记录 DNS 查询", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                    Text("观察微信定位时解析了哪些域名，用于确定拦截名单", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(checked = shieldObserve, onCheckedChange = { applyShield(it, false) })
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("拦截腾讯定位域名", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                    Text("让腾讯定位接口失败，逼微信使用系统模拟坐标", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(checked = shieldBlock, onCheckedChange = { applyShield(false, it) })
+            }
+            Text("累计 DNS 查询 ${shieldTotal} 条，拦截 ${shieldBlockedCount} 条",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            shieldRecent.take(6).forEach { line ->
+                Text(line, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+                    color = if (line.startsWith("拦截")) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    val text = buildString {
+                        appendLine("VPN：${if (shieldRunning) (if (shieldBlocking) "拦截" else "仅记录") else "关闭"}")
+                        appendLine("查询 ${shieldTotal}，拦截 ${shieldBlockedCount}")
+                        shieldRecent.forEach { appendLine(it) }
+                    }
+                    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("DNS 记录", text))
+                    notify("DNS 记录已复制")
+                }, Modifier.weight(1f)) { Text("复制 DNS 记录") }
+                OutlinedButton(onClick = { DnsShield.reset(); notify("已清空 DNS 记录") }, Modifier.weight(1f)) { Text("清空") }
+            }
+        }
+        PanelCard {
+            SectionTitle("已知限制", "实测结论")
+            Text("不开“网络定位拦截”时，微信发送位置/共享实时位置会显示真实网络定位；开启拦截后真机验证改用系统模拟坐标。华为 HMS 定位类系统应用仍会丢弃模拟坐标；高德等走系统定位的地图 App 直接采纳。微信以后更换定位域名时，用“只记录”抓新域名再补拦截名单。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         FilledTonalButton(onClick = onOpenSetup, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.CheckCircle, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("首次配置向导") }
@@ -614,7 +689,7 @@ private fun Diagnostics(allowed: Boolean, selected: Point, snapshot: SessionSnap
         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.secondaryContainer).padding(12.dp)) {
             Icon(Icons.Rounded.Info, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
             Spacer(Modifier.width(8.dp))
-            Text("系统 GPS 提交成功只代表系统层已注入。高德等走系统定位的地图 App 实测采纳；微信（腾讯自有定位）不采纳，见上方“已知限制”。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
+            Text("系统 GPS 提交成功只代表系统层已注入。高德等地图 App 直接采纳；微信需开启上方“网络定位拦截”，实测后发送位置和共享实时位置都会使用模拟坐标。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
         }
     }
 }
